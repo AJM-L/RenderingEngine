@@ -20,7 +20,6 @@ By default, the Makefile compiles the source with the `-O2` optimization level. 
 
 * `DEBUG=1` : disable optimizations and include symbols (`-g`).
 * `ASAN=1` : build with address sanitizer support (`-fsanitize=address`).
-# Metal Render Pipeline
 
 ## Overview
 

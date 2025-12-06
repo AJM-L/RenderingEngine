@@ -20,13 +20,87 @@ By default, the Makefile compiles the source with the `-O2` optimization level. 
 
 * `DEBUG=1` : disable optimizations and include symbols (`-g`).
 * `ASAN=1` : build with address sanitizer support (`-fsanitize=address`).
+# Metal Render Pipeline
 
-# Introduction
-For this project, I created a simple render pipeline in Metal using C++. I decided to pursue this project, because I missed coding in c++ and I wanted the chance to explore graphics APIs. My codebase is based on the Learn Metal C++ Template @ https://developer.apple.com/metal/sample-code/. On top of this template, I implemented point-based Blinn Phong lighting, added sphere generation, simple camera movement, and 3 custom material presets. 
+## Overview
 
-Discussion
-This project gave me a much deeper understanding of how a rendering pipeline functions beneath the abstractions of a high-level engine. I successfully implemented point-based Blinn–Phong lighting, generated custom sphere geometry, created multiple material presets, and built a functioning camera system within a fully manual C++/Metal pipeline. These features allowed me to produce a small but complete real-time rendering environment that I fully controlled, from data structures on the CPU to shading calculations on the GPU. If I had more time, I would have expanded the system in two main directions: visual quality and engine architecture. On the visual side, I would have implemented a skybox, reflections, and more advanced material shaders to push the lighting fidelity further. Architecturally, I would have liked to modularize the pipeline into clearer components like meshes, materials, and scene builder elements in order to get closer to the structure of a real engine. Additional improvements such as smoother camera input, more geometry types, and UI-based material switching would also have enhanced usability and expressiveness. Overall, the project demonstrated that I could meaningfully extend a low-level rendering template, and it highlighted exactly which areas I would pursue to transform it from a technical demonstration into a more polished, engine-like system.
-Sources
+This project implements a simple real-time rendering pipeline in **Metal** using **C++**. After spending much of the semester working in BabylonJS, I wanted to explore a lower-level graphics API and revisit C++ development. Starting from a minimal template that initialized a window and provided basic geometry rendering, I extended the system significantly.
 
-https://developer.apple.com/metal/sample-code/
-https://developer.apple.com/documentation/Metal/
+The final pipeline includes:
+
+- **Point-based Blinn–Phong lighting**
+- **Procedural sphere generation**
+- **Simple FPS-style camera movement**
+- **Three custom material presets** (matte, plastic, metallic)
+
+This project provided hands-on experience with GPU programming, shader development, and the structure of a graphics pipeline outside of a high-level engine.
+
+---
+
+## Challenges
+
+Transitioning from BabylonJS to Metal was the most substantial obstacle. BabylonJS abstracts nearly all rendering details—geometry buffers, camera management, light calculations—while Metal requires manual control over:
+
+- Buffer creation and memory layout  
+- Uniform and argument encoding  
+- Shader program structure  
+- Render pipeline configuration  
+
+To navigate this, I broke the pipeline into explicit stages and mapped familiar concepts (meshes, materials, transforms) onto Metal’s API. This required deepening my understanding of Metal’s buffer model and shader system.
+
+### Lighting Implementation
+
+The template only supported directional diffuse lighting. Implementing point-based Blinn–Phong lighting involved:
+
+- Restructuring uniform buffers  
+- Adding a light position and intensity  
+- Rewriting the fragment shader  
+- Debugging issues related to coordinate spaces and normal correctness  
+
+### Geometry Generation
+
+Metal does not provide built-in primitive shapes. Procedurally generating spheres required:
+
+- Computing latitude/longitude vertices  
+- Generating smooth normals  
+- Building indexed triangle lists  
+- Testing lighting across material presets to confirm correctness  
+
+### Unresolved or Partially Completed Challenges
+
+Some features did not make it into the final version due to time constraints:
+
+- **Skybox or textured background:** Implementing this required additional shader work and texture resources, so the pipeline uses a simple clear color.
+- **Physically Based Rendering (PBR):** Full PBR requires environment maps and additional material parameters. I compromised with three Blinn–Phong–based presets.
+- **Engine-level abstractions:** A more modular engine architecture (meshes, materials, scene graph) would improve extensibility, but was out of scope.
+- **Polished camera controls:** The camera works but lacks smoothing, mouse locking, or more expressive input handling.
+
+These compromises allowed me to focus on delivering stable, core rendering features within the project timeline.
+
+---
+
+## Discussion
+
+Overall, this project gave me a much deeper understanding of how a rendering pipeline operates beneath the abstractions of a high-level engine. By implementing point lighting, procedural geometry, custom materials, and a manual camera system, I built a small but complete real-time rendering environment where I controlled everything from CPU-side data structures to GPU-side shading calculations.
+
+With more time, I would have pursued improvements in two main areas:
+
+### 1. Visual Fidelity
+- Skybox and image-based reflections  
+- More advanced material models  
+- Higher-quality shading and post-processing  
+
+### 2. Architectural Structure
+- Modular engine-like components (mesh loader, material system, renderer interface)  
+- Additional geometry generators  
+- UI-based material switching  
+- Improved camera and input system  
+
+Despite some features not making it into the final build, the project succeeded in teaching me how low-level rendering works in practice and highlighted clear pathways for turning this prototype into a more polished mini-engine.
+
+---
+
+## Sources
+
+- https://developer.apple.com/metal/sample-code/  
+- https://developer.apple.com/documentation/Metal/

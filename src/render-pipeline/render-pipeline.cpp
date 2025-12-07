@@ -17,18 +17,17 @@
 #include <AppKit/AppKit.hpp>
 #include <MetalKit/MetalKit.hpp>
 #include <vector>
+#include <fstream>
+#include <sstream>
+#include <stdexcept>
 
 #include <simd/simd.h>
-
+#pragma region Declarations {
 static constexpr size_t kInstanceRows = 10;
 static constexpr size_t kInstanceColumns = 10;
 static constexpr size_t kInstanceDepth = 10;
 static constexpr size_t kNumInstances = (kInstanceRows * kInstanceColumns * kInstanceDepth);
-static constexpr size_t kMaxFramesInFlight = 3;
-
-
-
-#pragma region Declarations {
+static constexpr int kMaxFramesInFlight = 3;
 
 namespace math
 {
@@ -42,6 +41,74 @@ namespace math
     simd::float4x4 makeScale( const simd::float3& v );
     simd::float3x3 discardTranslation( const simd::float4x4& m );
 }
+
+namespace shader_types
+{
+    struct VertexData
+    {
+        simd::float3 position;
+        simd::float3 normal;
+        simd::float2 texcoord;
+    };
+
+    struct InstanceData
+    {
+        simd::float4x4 instanceTransform;
+        simd::float3x3 instanceNormalTransform;
+        simd::float4 instanceColor;
+        uint32_t materialIndex;
+    };
+
+    struct CameraData
+    {
+        simd::float4x4 perspectiveTransform;
+        simd::float4x4 worldTransform;
+        simd::float3x3 worldNormalTransform;
+        simd::float3 cameraPosition;
+        simd::float3 cameraDirection;
+    };
+
+    struct MaterialData
+    {
+        simd::float3 diffuseColor;
+        float reflectivity;
+        simd::float3 specularColor;
+        float shininess;
+        simd::float3 emissiveColor;
+        float _pad;
+    };
+
+    struct LightData
+    {
+        simd::float3 position;
+        float intensity;
+        simd::float3 color;
+        float _pad;
+    };
+}
+
+class SceneBuilder
+{
+public:
+    SceneBuilder();
+    ~SceneBuilder();
+
+    struct Mesh
+    {
+        std::vector<shader_types::VertexData> vertices;
+        std::vector<uint16_t> indices;
+    };
+
+    static Mesh importObjectFile(const std::string& path);
+
+    void loadPreset();
+    void setMesh(const Mesh& mesh);
+
+    const Mesh& getMesh() const { return _mesh; }
+
+private:
+    Mesh _mesh;
+};
 
 class Renderer
 {
@@ -326,251 +393,140 @@ namespace math
 
 }
 
-#pragma mark - Renderer
-#pragma region Renderer {
+#pragma mark - SceneBuilder
+#pragma region SceneBuilder {
+SceneBuilder::SceneBuilder() = default;
+SceneBuilder::~SceneBuilder() = default;
 
-const int Renderer::kMaxFramesInFlight = 3;
-
-Renderer::Renderer( MTL::Device* pDevice )
-: _pDevice( pDevice->retain() )
-, _angle (0.f )
-, _frame ( 0 )
+void SceneBuilder::setMesh(const Mesh& mesh)
 {
-    _pCommandQueue = _pDevice->newCommandQueue();
-    buildShaders();
-    buildDepthStencilStates();
-    buildBuffers();
-    
-    _semaphore = dispatch_semaphore_create( Renderer::kMaxFramesInFlight );
+    _mesh = mesh;
 }
-
-Renderer::~Renderer()
+static void parseFaceVertex(const std::string& token,
+                            int& vIdx, int& vtIdx, int& vnIdx)
 {
-    _pTexture->release();
-    _pShaderLibrary->release();
-    _pVertexDataBuffer->release();
-    for ( int i = 0; i < kMaxFramesInFlight; ++i )
+    vIdx = vtIdx = vnIdx = -1;
+
+    std::stringstream ss(token);
+    std::string part;
+    int i = 0;
+
+    while (std::getline(ss, part, '/'))
     {
-        _pInstanceDataBuffer[i]->release();
-    }
-    for ( int i = 0; i < kMaxFramesInFlight; ++i )
-    {
-        _pCameraDataBuffer[i]->release();
-    }
-    _pIndexBuffer->release();
-    _pPSO->release();
-    _pCommandQueue->release();
-    _pDevice->release();
-    _pMaterialBuffer->release();
-    _pLightBuffer->release();
-}
-
-namespace shader_types
-{
-struct VertexData
-{
-    simd::float3 position;
-    simd::float3 normal;
-    simd::float2 texcoord;
-};
-struct InstanceData
-{
-    simd::float4x4 instanceTransform;
-    simd::float3x3 instanceNormalTransform;
-    simd::float4 instanceColor;
-    uint32_t materialIndex;
-};
-struct CameraData
-{
-    simd::float4x4 perspectiveTransform;
-    simd::float4x4 worldTransform;
-    simd::float3x3 worldNormalTransform;
-    simd::float3   cameraPosition;
-    simd::float3   cameraDirection;
-};
-struct MaterialData
-{
-    simd::float3 diffuseColor;
-    float reflectivity;
-    simd::float3 specularColor;
-    float shininess;
-    simd::float3 emissiveColor;
-    float _pad;
-};
-struct LightData
-{
-    simd::float3 position;
-    float intensity;
-    simd::float3 color;
-    float _pad;
-};
-
-}
-
-void Renderer::buildShaders()
-{
-    using NS::StringEncoding::UTF8StringEncoding;
-    
-    const char* shaderSrc = R"(
-    #include <metal_stdlib>
-    using namespace metal;
-
-    struct VertexData
-    {
-        float3 position;
-        float3 normal;
-        float2 texcoord;
-    };
-
-    struct InstanceData
-    {
-        float4x4 instanceTransform;
-        float3x3 instanceNormalTransform;
-        float4 instanceColor;
-        uint32_t materialIndex;
-    };
-
-    struct CameraData
-    {
-        float4x4 perspectiveTransform;
-        float4x4 worldTransform;
-        float3x3 worldNormalTransform;
-        float3 cameraPosition;
-        float3 cameraDirection;
-    };
-    
-    struct MaterialData
-    {
-        float3 diffuseColor;
-        float reflectivity;
-        float3 specularColor;
-        float shininess;
-        float3 emissiveColor;
-        float _pad;
-    };
-    struct LightData
-    {
-        simd::float3 position;
-        float intensity;
-        simd::float3 color;
-        float _pad;
-    };
-
-    struct v2f
-    {
-        float4 position [[position]];
-        float3 normal;
-        float3 worldPos;
-        half3 color;
-        uint materialIndex;
-    };
-
-    vertex v2f vertexMain( device const VertexData*   vertexData   [[buffer(0)]],
-                           device const InstanceData* instanceData [[buffer(1)]],
-                           constant CameraData&       cameraData   [[buffer(2)]],
-                           uint vertexId   [[vertex_id]],
-                           uint instanceId [[instance_id]] )
-    {
-        v2f o;
-
-        const device VertexData&   vd   = vertexData[vertexId];
-        const device InstanceData& inst = instanceData[instanceId];
-
-        float4 localPos  = float4(vd.position, 1.0);
-        float4 worldPos4 = inst.instanceTransform * localPos;
-        float4 viewPos   = cameraData.worldTransform * worldPos4;
-        float4 clipPos   = cameraData.perspectiveTransform * viewPos;
-
-        o.position = clipPos;
-
-        float3 n = inst.instanceNormalTransform * vd.normal;
-        n = cameraData.worldNormalTransform * n;
-        o.normal   = n;
-
-        o.worldPos = worldPos4.xyz;
-        o.color    = half3(inst.instanceColor.rgb);
-    
-        o.materialIndex = inst.materialIndex;
-
-        return o;
-    }
-
-    fragment half4 fragmentMain( v2f in [[stage_in]],
-                                     constant CameraData&       cameraData [[buffer(2)]],
-                                     device   const MaterialData* materials [[buffer(3)]],
-                                     constant LightData&        light      [[buffer(4)]])
-     {
-            const device MaterialData& mat = materials[in.materialIndex];
-
-            float3 n       = normalize(in.normal);
-            float3 viewDir = normalize(cameraData.cameraPosition - in.worldPos);
-
-            // Point-light direction: from surface point toward light
-            float3 L       = normalize(light.position - in.worldPos);
-
-            // Diffuse
-            float ndotl    = saturate(dot(n, L));
-
-            // Blinn-Phong half vector
-            float3 halfDir = normalize(L + viewDir);
-            float  specAngle = max(dot(halfDir, n), 0.0);
-            float  specular  = pow(specAngle, mat.shininess);
-
-            float3 diffuse = mat.diffuseColor * ndotl * light.intensity;
-            float3 spec    = mat.specularColor * specular * light.intensity * 1.5;
-
-            float3 ambient  = 0.03 * mat.diffuseColor;
-            float3 emissive = mat.emissiveColor;
-
-            float3 color = ambient + diffuse + spec + emissive;
-
-            // modulate by light color
-            color *= light.color;
-
-            return half4(half3(color), 1.0);
+        if (!part.empty())
+        {
+            int val = std::stoi(part) - 1; // OBJ is 1-based
+            if (i == 0)      vIdx  = val;
+            else if (i == 1) vtIdx = val;
+            else if (i == 2) vnIdx = val;
         }
-    )";
-    NS::Error* pError = nullptr;
-    MTL::Library* pLibrary = _pDevice->newLibrary( NS::String::string(shaderSrc, UTF8StringEncoding), nullptr, &pError );
-    if ( !pLibrary )
-    {
-        __builtin_printf( "%s", pError->localizedDescription()->utf8String() );
-        assert( false );
+        ++i;
     }
-
-    MTL::Function* pVertexFn = pLibrary->newFunction( NS::String::string("vertexMain", UTF8StringEncoding) );
-    MTL::Function* pFragFn = pLibrary->newFunction( NS::String::string("fragmentMain", UTF8StringEncoding) );
-
-    MTL::RenderPipelineDescriptor* pDesc = MTL::RenderPipelineDescriptor::alloc()->init();
-    pDesc->setVertexFunction( pVertexFn );
-    pDesc->setFragmentFunction( pFragFn );
-    pDesc->colorAttachments()->object(0)->setPixelFormat( MTL::PixelFormat::PixelFormatBGRA8Unorm_sRGB );
-    pDesc->setDepthAttachmentPixelFormat( MTL::PixelFormat::PixelFormatDepth16Unorm );
-
-    _pPSO = _pDevice->newRenderPipelineState( pDesc, &pError );
-    if ( !_pPSO )
-    {
-        __builtin_printf( "%s", pError->localizedDescription()->utf8String() );
-        assert( false );
-    }
-
-    pVertexFn->release();
-    pFragFn->release();
-    pDesc->release();
-    _pShaderLibrary = pLibrary;
 }
 
-void Renderer::buildDepthStencilStates()
+SceneBuilder::Mesh SceneBuilder::importObjectFile(const std::string& path)
 {
-    MTL::DepthStencilDescriptor* pDsDesc = MTL::DepthStencilDescriptor::alloc()->init();
-    pDsDesc->setDepthCompareFunction( MTL::CompareFunction::CompareFunctionLess );
-    pDsDesc->setDepthWriteEnabled( true );
+    using simd::float3;
+    using simd::float2;
 
-    _pDepthStencilState = _pDevice->newDepthStencilState( pDsDesc );
+    std::ifstream file(path);
+    if (!file)
+        throw std::runtime_error("Failed to open OBJ file at: " + path);
 
-    pDsDesc->release();
+    std::vector<float3> positions;
+    std::vector<float3> normals;
+    std::vector<float2> texcoords;
+
+    Mesh mesh;
+
+    std::string line;
+    while (std::getline(file, line))
+    {
+        if (line.empty() || line[0] == '#')
+            continue;
+
+        std::stringstream ss(line);
+        std::string type;
+        ss >> type;
+
+        if (type == "v")
+        {
+            float x, y, z;
+            ss >> x >> y >> z;
+            float3 pos = { x, y, z };
+            positions.push_back(pos);
+        }
+        else if (type == "vn")
+        {
+            float x, y, z;
+            ss >> x >> y >> z;
+            float3 n = { x, y, z };
+            normals.push_back(n);
+        }
+        else if (type == "vt")
+        {
+            float u, v;
+            ss >> u >> v;
+            float2 t = { u, v };
+            texcoords.push_back(t);
+        }
+        else if (type == "f")
+        {
+            // Read all face vertices (supports triangles and quads)
+            std::vector<std::string> faceTokens;
+            std::string token;
+            while (ss >> token)
+            {
+                if (!token.empty())
+                    faceTokens.push_back(token);
+            }
+            
+            if (faceTokens.size() < 3)
+                continue;
+            
+            // Triangulate: fan triangulation for n-gons
+            // Triangle: 0-1-2
+            // Quad: 0-1-2 and 0-2-3
+            // N-gon: 0-1-2, 0-2-3, 0-3-4, ...
+            int numTriangles = (int)faceTokens.size() - 2;
+            
+            for (int tri = 0; tri < numTriangles; ++tri)
+            {
+                int indices[3];
+                indices[0] = 0;
+                indices[1] = tri + 1;
+                indices[2] = tri + 2;
+                
+                for (int k = 0; k < 3; ++k)
+                {
+                    int vIdx, vtIdx, vnIdx;
+                    parseFaceVertex(faceTokens[indices[k]], vIdx, vtIdx, vnIdx);
+
+                    shader_types::VertexData v{};
+
+                    if (vIdx >= 0 && vIdx < (int)positions.size())
+                        v.position = positions[vIdx];
+
+                    if (vnIdx >= 0 && vnIdx < (int)normals.size())
+                        v.normal = normals[vnIdx];
+                    else
+                        v.normal = {0.f, 1.f, 0.f}; // fallback
+
+                    if (vtIdx >= 0 && vtIdx < (int)texcoords.size())
+                        v.texcoord = texcoords[vtIdx];
+                    else
+                        v.texcoord = {0.f, 0.f};
+
+                    mesh.vertices.push_back(v);
+                    mesh.indices.push_back(
+                        static_cast<uint16_t>(mesh.vertices.size() - 1));
+                }
+            }
+        }
+    }
+
+    return mesh;
 }
-
 
 static void createSphereMesh(const float radius,
                              uint32_t stacks,
@@ -686,54 +642,314 @@ static void createCubeMesh(const float s, std::vector<shader_types::VertexData>&
 }
 */
 
+void SceneBuilder::loadPreset()
+{
+    const float radius  = 0.5f;
+    uint32_t    stacks  = 16;
+    uint32_t    slices  = 32;
+
+    std::vector<shader_types::VertexData> verts;
+    std::vector<uint16_t>                 indices;
+
+    createSphereMesh(radius, stacks, slices, verts, indices);
+
+    _mesh.vertices = std::move(verts);
+    _mesh.indices  = std::move(indices);
+}
+
+#pragma mark - Renderer
+#pragma region Renderer {
+
+const int Renderer::kMaxFramesInFlight = 3;
+
+Renderer::Renderer( MTL::Device* pDevice )
+: _pDevice( pDevice->retain() )
+, _pCommandQueue(nullptr)
+, _pShaderLibrary(nullptr)
+, _pPSO(nullptr)
+, _pDepthStencilState(nullptr)
+, _pTexture(nullptr)
+, _pVertexDataBuffer(nullptr)
+, _pIndexBuffer(nullptr)
+, _pMaterialBuffer(nullptr)
+, _pLightBuffer(nullptr)
+, _angle(0.f)
+, _frame(0)
+{
+    for (int i = 0; i < kMaxFramesInFlight; ++i)
+    {
+        _pInstanceDataBuffer[i] = nullptr;
+        _pCameraDataBuffer[i]   = nullptr;
+    }
+
+    _pCommandQueue = _pDevice->newCommandQueue();
+    buildShaders();
+    buildDepthStencilStates();
+    buildBuffers();
+    
+    _semaphore = dispatch_semaphore_create( Renderer::kMaxFramesInFlight );
+}
+Renderer::~Renderer()
+{
+    if (_pTexture)         _pTexture->release();
+    if (_pShaderLibrary)   _pShaderLibrary->release();
+    if (_pVertexDataBuffer)_pVertexDataBuffer->release();
+
+    for ( int i = 0; i < kMaxFramesInFlight; ++i )
+    {
+        if (_pInstanceDataBuffer[i])
+            _pInstanceDataBuffer[i]->release();
+    }
+    for ( int i = 0; i < kMaxFramesInFlight; ++i )
+    {
+        if (_pCameraDataBuffer[i])
+            _pCameraDataBuffer[i]->release();
+    }
+
+    if (_pIndexBuffer)     _pIndexBuffer->release();
+    if (_pPSO)             _pPSO->release();
+    if (_pCommandQueue)    _pCommandQueue->release();
+    if (_pDevice)          _pDevice->release();
+    if (_pMaterialBuffer)  _pMaterialBuffer->release();
+    if (_pLightBuffer)     _pLightBuffer->release();
+}
+
+void Renderer::buildShaders()
+{
+    using NS::StringEncoding::UTF8StringEncoding;
+    
+    const char* shaderSrc = R"(
+    #include <metal_stdlib>
+    using namespace metal;
+
+    struct VertexData
+    {
+        float3 position;
+        float3 normal;
+        float2 texcoord;
+    };
+
+    struct InstanceData
+    {
+        float4x4 instanceTransform;
+        float3x3 instanceNormalTransform;
+        float4 instanceColor;
+        uint32_t materialIndex;
+    };
+
+    struct CameraData
+    {
+        float4x4 perspectiveTransform;
+        float4x4 worldTransform;
+        float3x3 worldNormalTransform;
+        float3 cameraPosition;
+        float3 cameraDirection;
+    };
+    
+    struct MaterialData
+    {
+        float3 diffuseColor;
+        float reflectivity;
+        float3 specularColor;
+        float shininess;
+        float3 emissiveColor;
+        float _pad;
+    };
+    struct LightData
+    {
+        simd::float3 position;
+        float intensity;
+        simd::float3 color;
+        float _pad;
+    };
+
+    struct v2f
+    {
+        float4 position [[position]];
+        float3 normal;
+        float3 worldPos;
+        half3 color;
+        uint materialIndex;
+    };
+
+    vertex v2f vertexMain( device const VertexData*   vertexData   [[buffer(0)]],
+                           device const InstanceData* instanceData [[buffer(1)]],
+                           constant CameraData&       cameraData   [[buffer(2)]],
+                           uint vertexId   [[vertex_id]],
+                           uint instanceId [[instance_id]] )
+    {
+        v2f o;
+
+        const device VertexData&   vd   = vertexData[vertexId];
+        const device InstanceData& inst = instanceData[instanceId];
+
+        float4 localPos  = float4(vd.position, 1.0);
+        float4 worldPos4 = inst.instanceTransform * localPos;
+        float4 viewPos   = cameraData.worldTransform * worldPos4;
+        float4 clipPos   = cameraData.perspectiveTransform * viewPos;
+
+        o.position = clipPos;
+
+        float3 n = inst.instanceNormalTransform * vd.normal;
+        n = cameraData.worldNormalTransform * n;
+        o.normal   = n;
+
+        o.worldPos = worldPos4.xyz;
+        o.color    = half3(inst.instanceColor.rgb);
+    
+        o.materialIndex = inst.materialIndex;
+
+        return o;
+    }
+
+    fragment half4 fragmentMain( v2f in [[stage_in]],
+                                     constant CameraData&       cameraData [[buffer(2)]],
+                                     device   const MaterialData* materials [[buffer(3)]],
+                                     constant LightData&        light      [[buffer(4)]])
+     {
+            const device MaterialData& mat = materials[in.materialIndex];
+
+            float3 n       = normalize(in.normal);
+            float3 viewDir = normalize(cameraData.cameraPosition - in.worldPos);
+
+            // Point-light direction: from surface point toward light
+            float3 L       = normalize(light.position - in.worldPos);
+
+            // Diffuse
+            float ndotl = saturate(dot(n, L));
+
+            // Blinn-Phong half vector
+            float3 halfDir = normalize(L + viewDir);
+            float  specAngle = max(dot(halfDir, n), 0.0);
+            float  specular  = pow(specAngle, mat.shininess);
+
+            float3 diffuse = mat.diffuseColor * ndotl * light.intensity;
+            float3 spec = mat.specularColor * specular * light.intensity * 2.0;
+
+            float3 ambient = 0.05 * mat.diffuseColor;
+            float3 emissive = mat.emissiveColor;
+
+            float3 color = ambient + diffuse + spec + emissive;
+
+            // modulate by light color
+            color *= light.color;
+
+            return half4(half3(color), 1.0);
+        }
+    )";
+    NS::Error* pError = nullptr;
+    MTL::Library* pLibrary = _pDevice->newLibrary( NS::String::string(shaderSrc, UTF8StringEncoding), nullptr, &pError );
+    if ( !pLibrary )
+    {
+        __builtin_printf( "%s", pError->localizedDescription()->utf8String() );
+        assert( false );
+    }
+
+    MTL::Function* pVertexFn = pLibrary->newFunction( NS::String::string("vertexMain", UTF8StringEncoding) );
+    MTL::Function* pFragFn = pLibrary->newFunction( NS::String::string("fragmentMain", UTF8StringEncoding) );
+
+    MTL::RenderPipelineDescriptor* pDesc = MTL::RenderPipelineDescriptor::alloc()->init();
+    pDesc->setVertexFunction( pVertexFn );
+    pDesc->setFragmentFunction( pFragFn );
+    pDesc->colorAttachments()->object(0)->setPixelFormat( MTL::PixelFormat::PixelFormatBGRA8Unorm_sRGB );
+    pDesc->setDepthAttachmentPixelFormat( MTL::PixelFormat::PixelFormatDepth16Unorm );
+
+    _pPSO = _pDevice->newRenderPipelineState( pDesc, &pError );
+    if ( !_pPSO )
+    {
+        __builtin_printf( "%s", pError->localizedDescription()->utf8String() );
+        assert( false );
+    }
+
+    pVertexFn->release();
+    pFragFn->release();
+    pDesc->release();
+    _pShaderLibrary = pLibrary;
+}
+
+void Renderer::buildDepthStencilStates()
+{
+    MTL::DepthStencilDescriptor* pDsDesc = MTL::DepthStencilDescriptor::alloc()->init();
+    pDsDesc->setDepthCompareFunction( MTL::CompareFunction::CompareFunctionLess );
+    pDsDesc->setDepthWriteEnabled( true );
+
+    _pDepthStencilState = _pDevice->newDepthStencilState( pDsDesc );
+
+    pDsDesc->release();
+}
+
 void Renderer::buildBuffers()
 {
     using simd::float3;
     
-    // declare constants (comment out any unused to avoid compiler errors)
-    // const float s = 0.5f;
-    const float radius = 0.5f;
-    uint32_t stacks = 16;
-    uint32_t slices = 32;
+    SceneBuilder builder;
+    bool meshLoaded = false;
     
-    // initialize vectors for vertex and indice data
-    std::vector<shader_types::VertexData> vertsVec;
-    std::vector<uint16_t> indicesVec;
+    try
+    {
+        SceneBuilder::Mesh loadedMesh = builder.importObjectFile("./objects/Monkey.obj");
+        if (!loadedMesh.vertices.empty() && !loadedMesh.indices.empty())
+        {
+            builder.setMesh(loadedMesh);
+            meshLoaded = true;
+            __builtin_printf("Successfully loaded OBJ file\n");
+        }
+        else
+        {
+            __builtin_printf("OBJ file is empty, using preset sphere mesh\n");
+        }
+    }
+    catch (const std::exception& e)
+    {
+        __builtin_printf("Failed to load OBJ file: %s, using preset sphere mesh\n", e.what());
+    }
     
-    // Choose sphere or cubes
-    
-    createSphereMesh(radius, stacks, slices, vertsVec, indicesVec);
-    // createCubeMesh(s,vertsVec, indicesVec);
-    
-    
-    const size_t vertexDataSize = vertsVec.size() * sizeof(shader_types::VertexData);
-    const size_t indexDataSize  = indicesVec.size() * sizeof(uint16_t);
-    _indexCount = indicesVec.size();
+    // Fallback to preset if OBJ loading failed
+    if (!meshLoaded)
+    {
+        builder.loadPreset();
+    }
 
+    const SceneBuilder::Mesh& mesh = builder.getMesh();
     
-    MTL::Buffer* pVertexBuffer = _pDevice->newBuffer( vertexDataSize, MTL::ResourceStorageModeManaged );
-    MTL::Buffer* pIndexBuffer = _pDevice->newBuffer( indexDataSize, MTL::ResourceStorageModeManaged );
+    // Assert that mesh is not empty
+    assert(!mesh.vertices.empty() && !mesh.indices.empty() && "Mesh must not be empty");
     
-    _pVertexDataBuffer = pVertexBuffer;
-    _pIndexBuffer = pIndexBuffer;
-    
-    memcpy(_pVertexDataBuffer->contents(), vertsVec.data(), vertexDataSize);
-    memcpy(_pIndexBuffer->contents(), indicesVec.data(), indexDataSize);
-    
-    _pVertexDataBuffer->didModifyRange( NS::Range::Make( 0, _pVertexDataBuffer->length() ) );
-    _pIndexBuffer->didModifyRange( NS::Range::Make( 0, _pIndexBuffer->length() ) );
-    
-    const size_t instanceDataSize = kMaxFramesInFlight * kNumInstances * sizeof( shader_types::InstanceData );
-    for ( size_t i = 0; i < kMaxFramesInFlight; ++i )
+    if (mesh.vertices.empty() || mesh.indices.empty())
     {
-        _pInstanceDataBuffer[ i ] = _pDevice->newBuffer( instanceDataSize, MTL::ResourceStorageModeManaged );
+        __builtin_printf("Error: Mesh is empty! Vertices: %zu, Indices: %zu\n", 
+                         mesh.vertices.size(), mesh.indices.size());
+        assert(false && "Mesh must not be empty");
+    }
+
+    const size_t vertexDataSize = mesh.vertices.size() * sizeof(shader_types::VertexData);
+    const size_t indexDataSize  = mesh.indices.size()  * sizeof(uint16_t);
+    _indexCount = mesh.indices.size();
+
+    _pVertexDataBuffer = _pDevice->newBuffer(vertexDataSize, MTL::ResourceStorageModeManaged);
+    _pIndexBuffer = _pDevice->newBuffer(indexDataSize,  MTL::ResourceStorageModeManaged);
+
+    memcpy(_pVertexDataBuffer->contents(), mesh.vertices.data(), vertexDataSize);
+    memcpy(_pIndexBuffer->contents(),      mesh.indices.data(),  indexDataSize);
+
+    _pVertexDataBuffer->didModifyRange(NS::Range::Make(0, _pVertexDataBuffer->length()));
+    _pIndexBuffer->didModifyRange(NS::Range::Make(0, _pIndexBuffer->length()));
+    
+    // Instance data
+    const size_t instanceDataSize = kNumInstances * sizeof(shader_types::InstanceData);
+    for (size_t i = 0; i < kMaxFramesInFlight; ++i)
+    {
+        _pInstanceDataBuffer[i] =
+            _pDevice->newBuffer(instanceDataSize, MTL::ResourceStorageModeManaged);
+    }
+
+    const size_t cameraDataSize = sizeof(shader_types::CameraData);
+    for (size_t i = 0; i < kMaxFramesInFlight; ++i)
+    {
+        _pCameraDataBuffer[i] =
+            _pDevice->newBuffer(cameraDataSize, MTL::ResourceStorageModeManaged);
     }
     
-    const size_t cameraDataSize = kMaxFramesInFlight * sizeof( shader_types::CameraData );
-    for ( size_t i = 0; i < kMaxFramesInFlight; ++i )
-    {
-        _pCameraDataBuffer[ i ] = _pDevice->newBuffer( cameraDataSize, MTL::ResourceStorageModeManaged );
-    }
     shader_types::MaterialData materials[3];
 
         // 0: shiny plastic
@@ -746,7 +962,7 @@ void Renderer::buildBuffers()
         // 1: dull rubber
         materials[1].diffuseColor   = { 0.15f, 0.7f, 0.15f };
         materials[1].specularColor  = { 0.03f, 0.03f, 0.03f };
-        materials[1].shininess      = 4.0f;
+        materials[1].shininess      = 2.0f;
         materials[1].emissiveColor  = { 0.0f, 0.0f, 0.0f };
         materials[1].reflectivity   = 0.0f; //unused right now
 
@@ -762,16 +978,9 @@ void Renderer::buildBuffers()
         memcpy(_pMaterialBuffer->contents(), materials, sizeof(materials));
         _pMaterialBuffer->didModifyRange(NS::Range::Make(0, _pMaterialBuffer->length()));
     
+    // Light buffer - will be updated each frame in draw()
     shader_types::LightData light;
-       light.position  = { 0.0f, 0.0f, -20.0f };   // world-space position
-       light.intensity = 1.0f;
-       light.color     = { 1.0f, 1.0f, 1.0f };   // white light
-       light._pad      = 0.0f;
-
-       _pLightBuffer =
-           _pDevice->newBuffer(sizeof(light), MTL::ResourceStorageModeManaged);
-       memcpy(_pLightBuffer->contents(), &light, sizeof(light));
-       _pLightBuffer->didModifyRange(NS::Range::Make(0, _pLightBuffer->length()));
+    _pLightBuffer = _pDevice->newBuffer(sizeof(light), MTL::ResourceStorageModeManaged);
     
 }
 
@@ -851,11 +1060,8 @@ void Renderer::buildBuffers()
         MTL::Buffer* pCameraDataBuffer = _pCameraDataBuffer[ _frame ];
         shader_types::CameraData* pCameraData = reinterpret_cast< shader_types::CameraData* >( pCameraDataBuffer->contents() );
 
-        // Simple perspective
         pCameraData->perspectiveTransform = math::makePerspective( 45.f * M_PI / 180.f, 1.f, 0.03f, 500.0f );
 
-        // For now, keep worldTransform as identity (no view transform)
-        // This means you "move" the world by placing objects at z = -10, etc.
         pCameraData->worldTransform       = math::makeIdentity();
         pCameraData->worldNormalTransform = math::discardTranslation( pCameraData->worldTransform );
 
@@ -874,6 +1080,25 @@ void Renderer::buildBuffers()
         pCameraData->cameraDirection = forward;
 
         pCameraDataBuffer->didModifyRange( NS::Range::Make( 0, sizeof( shader_types::CameraData ) ) );
+
+        // Update light position - position it above and to the side of the scene for good illumination
+        shader_types::LightData* pLightData = reinterpret_cast< shader_types::LightData* >( _pLightBuffer->contents() );
+        
+        // Position light above and to the side, rotating around the scene for dynamic lighting
+        // Objects are centered at (0, 0, -10), so position light relative to that
+        float lightRadius = 12.0f;
+        float lightAngle = _angle * 0.3f; // Slow rotation for dynamic lighting
+        
+        pLightData->position = {
+            lightRadius * cosf(lightAngle),  // X: rotating around
+            12.0f,                           // Y: above the scene
+            -10.0f + lightRadius * 0.3f * sinf(lightAngle)  // Z: slightly moving
+        };
+        pLightData->intensity = 1.5f;  // Increased intensity for better visibility
+        pLightData->color = { 1.0f, 1.0f, 1.0f }; // white light
+        pLightData->_pad = 0.0f;
+        
+        _pLightBuffer->didModifyRange( NS::Range::Make( 0, sizeof( shader_types::LightData ) ) );
 
         // Begin render pass:
 

@@ -33,13 +33,15 @@ namespace math
 {
     constexpr simd::float3 add( const simd::float3& a, const simd::float3& b );
     constexpr simd_float4x4 makeIdentity();
-    simd::float4x4 makePerspective();
+    simd::float4x4 makePerspective( float fovRadians, float aspect, float znear, float zfar );
     simd::float4x4 makeXRotate( float angleRadians );
     simd::float4x4 makeYRotate( float angleRadians );
     simd::float4x4 makeZRotate( float angleRadians );
     simd::float4x4 makeTranslate( const simd::float3& v );
     simd::float4x4 makeScale( const simd::float3& v );
     simd::float3x3 discardTranslation( const simd::float4x4& m );
+    simd::float3x3 calculateNormalTransform( const simd::float4x4& m );
+    simd::float4x4 makeLookAt( simd::float3 eye, simd::float3 center, simd::float3 up );
 }
 
 namespace shader_types
@@ -390,6 +392,41 @@ namespace math
     {
         return simd_matrix( m.columns[0].xyz, m.columns[1].xyz, m.columns[2].xyz );
     }
+    
+    // Calculate proper normal transform (inverse transpose of upper-left 3x3)
+    simd::float3x3 calculateNormalTransform( const simd::float4x4& m )
+    {
+        // Extract upper-left 3x3
+        simd::float3x3 upper3x3 = discardTranslation(m);
+        
+        // Calculate inverse transpose for proper normal transformation
+        // For a 3x3 matrix: inverse_transpose = transpose(inverse(matrix))
+        // Using simd's built-in functions
+        simd::float3x3 transposed = simd_transpose(upper3x3);
+        simd::float3x3 inverse = simd_inverse(upper3x3);
+        return simd_transpose(inverse);
+    }
+
+    simd::float4x4 makeLookAt( simd::float3 eye, simd::float3 center, simd::float3 up )
+    {
+        using simd::float3;
+        using simd::float4;
+
+        // Right-handed look-at
+        float3 z = simd::normalize(eye - center);          // camera forward (toward eye)
+        float3 x = simd::normalize(simd::cross(up, z));    // camera right
+        float3 y = simd::cross(z, x);                      // camera up
+
+        float4 col0 = { x.x, y.x, z.x, 0.0f };
+        float4 col1 = { x.y, y.y, z.y, 0.0f };
+        float4 col2 = { x.z, y.z, z.z, 0.0f };
+        float4 col3 = { -simd::dot(x, eye),
+                        -simd::dot(y, eye),
+                        -simd::dot(z, eye),
+                        1.0f };
+
+        return simd_matrix(col0, col1, col2, col3);  // column-major
+    }
 
 }
 
@@ -584,13 +621,15 @@ static void createSphereMesh(const float radius,
             uint32_t first  = stack * vertsPerRow + slice;
             uint32_t second = first + vertsPerRow;
 
+            // First triangle - reversed winding to fix normal orientation
             outIndices.push_back((uint16_t)first);
-            outIndices.push_back((uint16_t)second);
             outIndices.push_back((uint16_t)(first + 1));
+            outIndices.push_back((uint16_t)second);
 
+            // Second triangle - reversed winding to fix normal orientation
             outIndices.push_back((uint16_t)(first + 1));
-            outIndices.push_back((uint16_t)second);
             outIndices.push_back((uint16_t)(second + 1));
+            outIndices.push_back((uint16_t)second);
         }
     }
 }
@@ -757,9 +796,9 @@ void Renderer::buildShaders()
     };
     struct LightData
     {
-        simd::float3 position;
+        float3 position;
         float intensity;
-        simd::float3 color;
+        float3 color;
         float _pad;
     };
 
@@ -783,20 +822,22 @@ void Renderer::buildShaders()
         const device VertexData&   vd   = vertexData[vertexId];
         const device InstanceData& inst = instanceData[instanceId];
 
+        // Positions
         float4 localPos  = float4(vd.position, 1.0);
-        float4 worldPos4 = inst.instanceTransform * localPos;
-        float4 viewPos   = cameraData.worldTransform * worldPos4;
-        float4 clipPos   = cameraData.perspectiveTransform * viewPos;
+        float4 worldPos4 = inst.instanceTransform * localPos;              // object -> world
+        float4 viewPos   = cameraData.worldTransform * worldPos4;          // world -> view
+        float4 clipPos   = cameraData.perspectiveTransform * viewPos;      // view -> clip
 
         o.position = clipPos;
 
-        float3 n = inst.instanceNormalTransform * vd.normal;
-        n = cameraData.worldNormalTransform * n;
-        o.normal   = n;
+        // Normals: object -> world only (normalize after transformation)
+        float3 nWorld = inst.instanceNormalTransform * vd.normal;
+        o.normal      = normalize(nWorld);                                // world-space normal (normalized)
 
+        // Store world-space position for lighting
         o.worldPos = worldPos4.xyz;
-        o.color    = half3(inst.instanceColor.rgb);
-    
+
+        o.color        = half3(inst.instanceColor.rgb);
         o.materialIndex = inst.materialIndex;
 
         return o;
@@ -810,29 +851,48 @@ void Renderer::buildShaders()
             const device MaterialData& mat = materials[in.materialIndex];
 
             float3 n       = normalize(in.normal);
+            // View direction: from surface toward camera (in world space)
             float3 viewDir = normalize(cameraData.cameraPosition - in.worldPos);
 
             // Point-light direction: from surface point toward light
-            float3 L       = normalize(light.position - in.worldPos);
+            float3 L = normalize(light.position - in.worldPos);
 
             // Diffuse
             float ndotl = saturate(dot(n, L));
 
-            // Blinn-Phong half vector
-            float3 halfDir = normalize(L + viewDir);
-            float  specAngle = max(dot(halfDir, n), 0.0);
-            float  specular  = pow(specAngle, mat.shininess);
+            // Blinn-Phong half vector (only calculate if surface is facing light)
+            float specular = 0.0;
+            if (ndotl > 0.0) {
+                // Calculate half vector between light and view directions
+                float3 halfDir = normalize(L + viewDir);
+                // Ensure half vector is valid (not zero length)
+                float halfLen = length(L + viewDir);
+                if (halfLen > 0.001) {
+                    float specAngle = max(dot(halfDir, n), 0.0);
+                    if (specAngle > 0.0) {
+                        specular = pow(specAngle, mat.shininess);
+                    }
+                }
+            }
 
-            float3 diffuse = mat.diffuseColor * ndotl * light.intensity;
-            float3 spec = mat.specularColor * specular * light.intensity * 2.0;
-
-            float3 ambient = 0.05 * mat.diffuseColor;
+            // Calculate lighting components
+            // Use a more balanced intensity scaling to prevent overexposure
+            float intensityScale = light.intensity * 0.3; // Scale down to prevent overexposure
+            float3 diffuse = mat.diffuseColor * ndotl * intensityScale;
+            
+            // Specular calculation - multiply by ndotl for proper falloff, but use full intensity
+            // This ensures specular is visible even on dark metallic materials
+            float3 spec = mat.specularColor * specular * ndotl * light.intensity;
+            
+            // Ambient and emissive are independent of light color
+            float3 ambient = 0.1 * mat.diffuseColor; // Increased ambient for better base visibility
             float3 emissive = mat.emissiveColor;
-
-            float3 color = ambient + diffuse + spec + emissive;
-
-            // modulate by light color
-            color *= light.color;
+            
+            // Apply light color only to lit components (diffuse and specular)
+            float3 litColor = (diffuse + spec) * light.color;
+            
+            // Combine: ambient and emissive are unaffected by light color
+            float3 color = ambient + litColor + emissive;
 
             return half4(half3(color), 1.0);
         }
@@ -955,7 +1015,7 @@ void Renderer::buildBuffers()
         // 0: shiny plastic
         materials[0].diffuseColor   = { 0.6f, 0.05f, 0.05f };
         materials[0].specularColor  = { 1.0f, 0.9f, 0.9f };
-        materials[0].shininess      = 96.0f;
+        materials[0].shininess      = 16.0f;
         materials[0].emissiveColor  = { 0.02f, 0.01f, 0.01f };
         materials[0].reflectivity   = 0.2f; //unused right now
 
@@ -966,10 +1026,10 @@ void Renderer::buildBuffers()
         materials[1].emissiveColor  = { 0.0f, 0.0f, 0.0f };
         materials[1].reflectivity   = 0.0f; //unused right now
 
-        // 2: gold-like
-        materials[2].diffuseColor = {0.05f, 0.04f, 0.02f};
-        materials[2].specularColor = {1.0f, 0.9f, 0.6f};
-        materials[2].shininess     = 32.0f;
+        // 2: gold-like (metallic - low diffuse, high specular)
+        materials[2].diffuseColor = {0.1f, 0.08f, 0.04f};  // Slightly brighter for visibility
+        materials[2].specularColor = {1.0f, 0.9f, 0.8f};
+        materials[2].shininess     = 32.0f;  // Lower shininess for more visible highlights
         materials[2].emissiveColor  = { 0.05f, 0.04f, 0.02f };
         materials[2].reflectivity   = 0.7f; //unused right now
 
@@ -1009,7 +1069,7 @@ void Renderer::buildBuffers()
         const float scl = 0.2f;
         shader_types::InstanceData* pInstanceData = reinterpret_cast< shader_types::InstanceData *>( pInstanceDataBuffer->contents() );
 
-        float3 objectPosition = { 0.f, 0.f, -10.f };
+        float3 objectPosition = { 0.f, 0.f, 0.f };
 
         float4x4 rt = math::makeTranslate( objectPosition );
         float4x4 rr1 = math::makeYRotate( -_angle );
@@ -1043,7 +1103,8 @@ void Renderer::buildBuffers()
             float4x4 translate = math::makeTranslate( math::add( objectPosition, { x, y, z } ) );
 
             pInstanceData[ i ].instanceTransform = fullObjectRot * translate * yrot * zrot * scale;
-            pInstanceData[ i ].instanceNormalTransform = math::discardTranslation( pInstanceData[ i ].instanceTransform );
+            // Use proper normal transform (inverse transpose) for correct normal orientation
+            pInstanceData[ i ].instanceNormalTransform = math::calculateNormalTransform( pInstanceData[ i ].instanceTransform );
 
             float iDivNumInstances = i / (float)kNumInstances;
             float r = iDivNumInstances;
@@ -1057,44 +1118,56 @@ void Renderer::buildBuffers()
         pInstanceDataBuffer->didModifyRange( NS::Range::Make( 0, pInstanceDataBuffer->length() ) );
 
         // Update camera state:
-        MTL::Buffer* pCameraDataBuffer = _pCameraDataBuffer[ _frame ];
-        shader_types::CameraData* pCameraData = reinterpret_cast< shader_types::CameraData* >( pCameraDataBuffer->contents() );
+        MTL::Buffer* pCameraDataBuffer = _pCameraDataBuffer[_frame];
+        auto* pCameraData = reinterpret_cast<shader_types::CameraData*>(pCameraDataBuffer->contents());
 
-        pCameraData->perspectiveTransform = math::makePerspective( 45.f * M_PI / 180.f, 1.f, 0.03f, 500.0f );
+        float width  = static_cast<float>(pView->drawableSize().width);
+        float height = static_cast<float>(pView->drawableSize().height);
+        float aspect = width / height;
 
-        pCameraData->worldTransform       = math::makeIdentity();
-        pCameraData->worldNormalTransform = math::discardTranslation( pCameraData->worldTransform );
+        // Choose reasonable near/far planes
+        pCameraData->perspectiveTransform = math::makePerspective(45.f * M_PI / 180.f, aspect, 0.1f, 100.0f);
 
-        // Define camera position + direction in world space
-        float radius = 20.0f;
-        float camX = radius * cosf(_angle) * 0; // no rotation rn
-        float camZ = radius * sinf(_angle) * 0;
-        float camY = 10.0f;   // a bit above
+        // Camera that orbits around the origin a bit
+        float radius = 10.0f;
+        float camAngle = _angle * 0.5f;
 
-        simd::float3 cameraPos = { camX, camY, camZ };
-        simd::float3 target    = { 0.f, 0.f, -10.f };
-        simd::float3 forward   = simd::normalize(target - cameraPos);
+        simd::float3 eye = { radius * cosf(camAngle),
+                                1.0f,                             // a bit above
+                                radius * sinf(camAngle) };
+        
+        simd::float3 center = objectPosition;                    // look at the object
+        simd::float3 up = { 0.0f, 1.0f, 0.0f };
 
-        // Fill struct
-        pCameraData->cameraPosition  = cameraPos;
-        pCameraData->cameraDirection = forward;
+        // View matrix
+        simd::float4x4 view = math::makeLookAt(eye, center, up);
 
-        pCameraDataBuffer->didModifyRange( NS::Range::Make( 0, sizeof( shader_types::CameraData ) ) );
+        // Store in camera data (view matrix)
+        pCameraData->worldTransform       = view;
+        pCameraData->worldNormalTransform = math::discardTranslation(view);
 
-        // Update light position - position it above and to the side of the scene for good illumination
+        // Still keep cameraPosition / cameraDirection in *world* space
+        pCameraData->cameraPosition  = eye;
+        pCameraData->cameraDirection = simd::normalize(center - eye);
+
+        pCameraDataBuffer->didModifyRange(
+            NS::Range::Make(0, sizeof(shader_types::CameraData)));
+
+        // Update light position - rotate it around the scene
         shader_types::LightData* pLightData = reinterpret_cast< shader_types::LightData* >( _pLightBuffer->contents() );
         
-        // Position light above and to the side, rotating around the scene for dynamic lighting
-        // Objects are centered at (0, 0, -10), so position light relative to that
-        float lightRadius = 12.0f;
-        float lightAngle = _angle * 0.3f; // Slow rotation for dynamic lighting
+        // Rotate light around the scene at a different rate than the camera
+        float lightRadius = 10.0f;
+        float lightHeight = 6.0f;
+        float lightAngle = _angle * 0.8f; // Rotate slower than camera for dynamic lighting
         
         pLightData->position = {
             lightRadius * cosf(lightAngle),  // X: rotating around
-            12.0f,                           // Y: above the scene
-            -10.0f + lightRadius * 0.3f * sinf(lightAngle)  // Z: slightly moving
+            lightHeight,                     // Y: above the scene
+            lightRadius * sinf(lightAngle)   // Z: rotating around
         };
-        pLightData->intensity = 1.5f;  // Increased intensity for better visibility
+        
+        pLightData->intensity = 3.0f;  // Increased intensity for better visibility
         pLightData->color = { 1.0f, 1.0f, 1.0f }; // white light
         pLightData->_pad = 0.0f;
         

@@ -71,6 +71,7 @@ namespace shader_types
         simd::float3x3 worldNormalTransform;
         simd::float3 cameraPosition;
         simd::float3 cameraDirection;
+        float time;
     };
 
     struct MaterialData
@@ -1061,6 +1062,7 @@ void Renderer::buildShaders()
         float3x3 worldNormalTransform;
         float3 cameraPosition;
         float3 cameraDirection;
+        float time;
     };
     
     struct MaterialData
@@ -1101,7 +1103,7 @@ void Renderer::buildShaders()
         const device InstanceData& inst = instanceData[instanceId];
 
         // Positions
-        float4 localPos  = float4(vd.position, 1.0);
+        float4 localPos  = float4(vd.position, 1.0) + float4(tan(cameraData.time* 5), 0, 0, 0);
         float4 worldPos4 = inst.instanceTransform * localPos;              // object -> world
         float4 viewPos   = cameraData.worldTransform * worldPos4;          // world -> view
         float4 clipPos   = cameraData.perspectiveTransform * viewPos;      // view -> clip
@@ -1171,6 +1173,9 @@ void Renderer::buildShaders()
             
             // Combine: ambient and emissive are unaffected by light color
             float3 color = ambient + litColor + emissive;
+
+            float3 colorAdjust = float3(sin(cameraData.time), cos(cameraData.time) * sin(cameraData.time), cos(cameraData.time)*cos(cameraData.time));
+            color = color * colorAdjust;
 
             return half4(half3(color), 1.0);
         }
@@ -1442,6 +1447,9 @@ void Renderer::buildBuffers()
         // Still keep cameraPosition / cameraDirection in *world* space
         pCameraData->cameraPosition  = eye;
         pCameraData->cameraDirection = simd::normalize(center - eye);
+        
+        // Pass time to fragment shader
+        pCameraData->time = _angle;
 
         pCameraDataBuffer->didModifyRange(
             NS::Range::Make(0, sizeof(shader_types::CameraData)));

@@ -20,6 +20,8 @@
 #include <fstream>
 #include <sstream>
 #include <stdexcept>
+#include <unordered_map>
+#include <tuple>
 
 #include <simd/simd.h>
 #pragma region Declarations {
@@ -98,7 +100,7 @@ public:
     struct Mesh
     {
         std::vector<shader_types::VertexData> vertices;
-        std::vector<uint16_t> indices;
+        std::vector<uint32_t> indices;
     };
 
     static Mesh importObjectFile(const std::string& path);
@@ -439,8 +441,22 @@ void SceneBuilder::setMesh(const Mesh& mesh)
 {
     _mesh = mesh;
 }
-static void parseFaceVertex(const std::string& token,
-                            int& vIdx, int& vtIdx, int& vnIdx)
+
+// Hash function for tuple<int, int, int> to use as unordered_map key
+struct TupleHash {
+    size_t operator()(const std::tuple<int, int, int>& t) const {
+        // Combine the three integers into a hash
+        size_t h1 = std::hash<int>{}(std::get<0>(t));
+        size_t h2 = std::hash<int>{}(std::get<1>(t));
+        size_t h3 = std::hash<int>{}(std::get<2>(t));
+        // Standard hash combination with prime multiplier
+        return h1 ^ (h2 << 1) ^ (h3 << 2);
+    }
+};
+
+static bool parseFaceVertex(const std::string& token,
+                            int& vIdx, int& vtIdx, int& vnIdx,
+                            size_t numPositions, size_t numTexcoords, size_t numNormals)
 {
     vIdx = vtIdx = vnIdx = -1;
 
@@ -452,13 +468,53 @@ static void parseFaceVertex(const std::string& token,
     {
         if (!part.empty())
         {
-            int val = std::stoi(part) - 1; // OBJ is 1-based
-            if (i == 0)      vIdx  = val;
-            else if (i == 1) vtIdx = val;
-            else if (i == 2) vnIdx = val;
+            try
+            {
+                int val = std::stoi(part);
+                
+                // Handle negative indices (relative to end of array)
+                // OBJ format: positive indices are 1-based, negative are relative
+                if (val < 0)
+                {
+                    // Convert negative index to absolute
+                    // -1 means last element, -2 means second-to-last, etc.
+                    size_t arraySize = 0;
+                    if (i == 0)
+                        arraySize = numPositions;
+                    else if (i == 1)
+                        arraySize = numTexcoords;
+                    else if (i == 2)
+                        arraySize = numNormals;
+                    
+                    if (arraySize == 0)
+                        return false; // Invalid negative index on empty array
+                    
+                    val = (int)arraySize + val; // val is already negative
+                    
+                    // Validate converted index is in bounds
+                    if (val < 0 || val >= (int)arraySize)
+                        return false;
+                }
+                else
+                {
+                    // Positive indices: convert from 1-based to 0-based
+                    val = val - 1;
+                }
+                
+                if (i == 0)      vIdx  = val;
+                else if (i == 1) vtIdx = val;
+                else if (i == 2) vnIdx = val;
+            }
+            catch (const std::exception&)
+            {
+                // Malformed token - skip this face vertex
+                return false;
+            }
         }
         ++i;
     }
+    
+    return true;
 }
 
 SceneBuilder::Mesh SceneBuilder::importObjectFile(const std::string& path)
@@ -475,6 +531,11 @@ SceneBuilder::Mesh SceneBuilder::importObjectFile(const std::string& path)
     std::vector<float2> texcoords;
 
     Mesh mesh;
+    
+    // Hash map to deduplicate vertices by (vIdx, vtIdx, vnIdx) tuple
+    // Key: (position index, texcoord index, normal index)
+    // Value: index into mesh.vertices
+    std::unordered_map<std::tuple<int, int, int>, uint32_t, TupleHash> vertexMap;
 
     std::string line;
     while (std::getline(file, line))
@@ -489,23 +550,32 @@ SceneBuilder::Mesh SceneBuilder::importObjectFile(const std::string& path)
         if (type == "v")
         {
             float x, y, z;
-            ss >> x >> y >> z;
-            float3 pos = { x, y, z };
-            positions.push_back(pos);
+            if (ss >> x >> y >> z)
+            {
+                float3 pos = { x, y, z };
+                positions.push_back(pos);
+            }
+            // Silently skip malformed vertex lines
         }
         else if (type == "vn")
         {
             float x, y, z;
-            ss >> x >> y >> z;
-            float3 n = { x, y, z };
-            normals.push_back(n);
+            if (ss >> x >> y >> z)
+            {
+                float3 n = { x, y, z };
+                normals.push_back(n);
+            }
+            // Silently skip malformed normal lines
         }
         else if (type == "vt")
         {
             float u, v;
-            ss >> u >> v;
-            float2 t = { u, v };
-            texcoords.push_back(t);
+            if (ss >> u >> v)
+            {
+                float2 t = { u, v };
+                texcoords.push_back(t);
+            }
+            // Silently skip malformed texcoord lines
         }
         else if (type == "f")
         {
@@ -534,29 +604,68 @@ SceneBuilder::Mesh SceneBuilder::importObjectFile(const std::string& path)
                 indices[1] = tri + 1;
                 indices[2] = tri + 2;
                 
+                // Parse all three vertices first
+                int vIndices[3], vtIndices[3], vnIndices[3];
+                bool validTriangle = true;
+                
                 for (int k = 0; k < 3; ++k)
                 {
-                    int vIdx, vtIdx, vnIdx;
-                    parseFaceVertex(faceTokens[indices[k]], vIdx, vtIdx, vnIdx);
-
-                    shader_types::VertexData v{};
-
-                    if (vIdx >= 0 && vIdx < (int)positions.size())
-                        v.position = positions[vIdx];
-
-                    if (vnIdx >= 0 && vnIdx < (int)normals.size())
-                        v.normal = normals[vnIdx];
+                    if (!parseFaceVertex(faceTokens[indices[k]], vIndices[k], vtIndices[k], vnIndices[k],
+                                         positions.size(), texcoords.size(), normals.size()))
+                    {
+                        validTriangle = false;
+                        break;
+                    }
+                    
+                    // Validate vertex index (must be valid)
+                    if (vIndices[k] < 0 || vIndices[k] >= (int)positions.size())
+                    {
+                        validTriangle = false;
+                        break;
+                    }
+                }
+                
+                // Only create triangle if all vertices parsed successfully
+                if (!validTriangle)
+                    continue;
+                
+                // Add indices for the three vertices (with deduplication)
+                for (int k = 0; k < 3; ++k)
+                {
+                    // Create key tuple for this vertex combination
+                    std::tuple<int, int, int> vertexKey(vIndices[k], vtIndices[k], vnIndices[k]);
+                    
+                    // Check if we've seen this vertex combination before
+                    auto it = vertexMap.find(vertexKey);
+                    if (it != vertexMap.end())
+                    {
+                        // Reuse existing vertex index
+                        mesh.indices.push_back(it->second);
+                    }
                     else
-                        v.normal = {0.f, 1.f, 0.f}; // fallback
+                    {
+                        // Create new vertex
+                        shader_types::VertexData v{};
+                        v.position = positions[vIndices[k]];
 
-                    if (vtIdx >= 0 && vtIdx < (int)texcoords.size())
-                        v.texcoord = texcoords[vtIdx];
-                    else
-                        v.texcoord = {0.f, 0.f};
+                        if (vnIndices[k] >= 0 && vnIndices[k] < (int)normals.size())
+                            v.normal = normals[vnIndices[k]];
+                        else
+                            v.normal = {0.f, 1.f, 0.f}; // fallback
 
-                    mesh.vertices.push_back(v);
-                    mesh.indices.push_back(
-                        static_cast<uint16_t>(mesh.vertices.size() - 1));
+                        if (vtIndices[k] >= 0 && vtIndices[k] < (int)texcoords.size())
+                            v.texcoord = texcoords[vtIndices[k]];
+                        else
+                            v.texcoord = {0.f, 0.f};
+
+                        // Add vertex and store its index
+                        uint32_t vertexIndex = static_cast<uint32_t>(mesh.vertices.size());
+                        mesh.vertices.push_back(v);
+                        mesh.indices.push_back(vertexIndex);
+                        
+                        // Store in map for future reuse
+                        vertexMap[vertexKey] = vertexIndex;
+                    }
                 }
             }
         }
@@ -569,7 +678,7 @@ static void createSphereMesh(const float radius,
                              uint32_t stacks,
                              uint32_t slices,
                              std::vector<shader_types::VertexData>& outVerts,
-                             std::vector<uint16_t>& outIndices)
+                             std::vector<uint32_t>& outIndices)
 {
     using simd::float3;
     using simd::float2;
@@ -622,20 +731,20 @@ static void createSphereMesh(const float radius,
             uint32_t second = first + vertsPerRow;
 
             // First triangle - reversed winding to fix normal orientation
-            outIndices.push_back((uint16_t)first);
-            outIndices.push_back((uint16_t)(first + 1));
-            outIndices.push_back((uint16_t)second);
+            outIndices.push_back((uint32_t)first);
+            outIndices.push_back((uint32_t)(first + 1));
+            outIndices.push_back((uint32_t)second);
 
             // Second triangle - reversed winding to fix normal orientation
-            outIndices.push_back((uint16_t)(first + 1));
-            outIndices.push_back((uint16_t)(second + 1));
-            outIndices.push_back((uint16_t)second);
+            outIndices.push_back((uint32_t)(first + 1));
+            outIndices.push_back((uint32_t)(second + 1));
+            outIndices.push_back((uint32_t)second);
         }
     }
 }
 
 /*
-static void createCubeMesh(const float s, std::vector<shader_types::VertexData>& outVerts, std::vector<uint16_t>& outIndices) {
+static void createCubeMesh(const float s, std::vector<shader_types::VertexData>& outVerts, std::vector<uint32_t>& outIndices) {
     outVerts = std::vector<shader_types::VertexData>{
         //   Positions          Normals
         { { -s, -s, +s }, { 0.f,  0.f,  1.f } },
@@ -669,7 +778,7 @@ static void createCubeMesh(const float s, std::vector<shader_types::VertexData>&
         { { -s, -s, +s }, { 0.f, -1.f,  0.f } },
     };
     
-    outIndices = std::vector<uint16_t>{
+    outIndices = std::vector<uint32_t>{
         0,  1,  2,  2,  3,  0,
         4,  5,  6,  6,  7,  4,
         8,  9, 10, 10, 11,  8,
@@ -688,7 +797,7 @@ void SceneBuilder::loadPreset()
     uint32_t    slices  = 32;
 
     std::vector<shader_types::VertexData> verts;
-    std::vector<uint16_t>                 indices;
+    std::vector<uint32_t>                 indices;
 
     createSphereMesh(radius, stacks, slices, verts, indices);
 
@@ -747,6 +856,7 @@ Renderer::~Renderer()
 
     if (_pIndexBuffer)     _pIndexBuffer->release();
     if (_pPSO)             _pPSO->release();
+    if (_pDepthStencilState) _pDepthStencilState->release();
     if (_pCommandQueue)    _pCommandQueue->release();
     if (_pDevice)          _pDevice->release();
     if (_pMaterialBuffer)  _pMaterialBuffer->release();
@@ -947,7 +1057,7 @@ void Renderer::buildBuffers()
     
     try
     {
-        SceneBuilder::Mesh loadedMesh = builder.importObjectFile("./objects/Monkey.obj");
+        SceneBuilder::Mesh loadedMesh = builder.importObjectFile("./objects/Breaking.obj");
         if (!loadedMesh.vertices.empty() && !loadedMesh.indices.empty())
         {
             builder.setMesh(loadedMesh);
@@ -983,7 +1093,7 @@ void Renderer::buildBuffers()
     }
 
     const size_t vertexDataSize = mesh.vertices.size() * sizeof(shader_types::VertexData);
-    const size_t indexDataSize  = mesh.indices.size()  * sizeof(uint16_t);
+    const size_t indexDataSize  = mesh.indices.size()  * sizeof(uint32_t);
     _indexCount = mesh.indices.size();
 
     _pVertexDataBuffer = _pDevice->newBuffer(vertexDataSize, MTL::ResourceStorageModeManaged);
@@ -1192,7 +1302,7 @@ void Renderer::buildBuffers()
         pEnc->setFrontFacingWinding( MTL::Winding::WindingCounterClockwise );
 
         
-        pEnc->drawIndexedPrimitives( MTL::PrimitiveType::PrimitiveTypeTriangle, _indexCount, MTL::IndexType::IndexTypeUInt16, _pIndexBuffer, 0, kNumInstances );
+        pEnc->drawIndexedPrimitives( MTL::PrimitiveType::PrimitiveTypeTriangle, _indexCount, MTL::IndexType::IndexTypeUInt32, _pIndexBuffer, 0, kNumInstances );
 
         pEnc->endEncoding();
         pCmd->presentDrawable( pView->currentDrawable() );

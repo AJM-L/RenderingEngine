@@ -22,12 +22,13 @@
 #include <stdexcept>
 #include <unordered_map>
 #include <tuple>
+#include <string>
 
 #include <simd/simd.h>
 #pragma region Declarations {
-static constexpr size_t kInstanceRows = 10;
-static constexpr size_t kInstanceColumns = 10;
-static constexpr size_t kInstanceDepth = 10;
+static constexpr size_t kInstanceRows = 1;
+static constexpr size_t kInstanceColumns = 1;
+static constexpr size_t kInstanceDepth = 1;
 static constexpr size_t kNumInstances = (kInstanceRows * kInstanceColumns * kInstanceDepth);
 static constexpr int kMaxFramesInFlight = 3;
 
@@ -142,6 +143,7 @@ class Renderer
         dispatch_semaphore_t _semaphore;
         static const int kMaxFramesInFlight;
         size_t _indexCount;
+        size_t _materialCount;
 };
 
 class MyMTKViewDelegate : public MTK::ViewDelegate
@@ -805,6 +807,171 @@ void SceneBuilder::loadPreset()
     _mesh.indices  = std::move(indices);
 }
 
+// Parse .mtl file and return a vector of MaterialData
+// Returns empty vector if file cannot be opened or parsed
+static std::vector<shader_types::MaterialData> parseMaterialFile(const std::string& mtlPath)
+{
+    using simd::float3;
+    std::vector<shader_types::MaterialData> materials;
+    
+    std::ifstream file(mtlPath);
+    if (!file)
+    {
+        return materials; // Return empty vector if file doesn't exist
+    }
+    
+    shader_types::MaterialData currentMaterial{};
+    bool hasCurrentMaterial = false;
+    
+    // Initialize default values
+    currentMaterial.diffuseColor = {0.8f, 0.8f, 0.8f};
+    currentMaterial.specularColor = {0.0f, 0.0f, 0.0f};
+    currentMaterial.emissiveColor = {0.0f, 0.0f, 0.0f};
+    currentMaterial.shininess = 0.0f;
+    currentMaterial.reflectivity = 0.0f;
+    currentMaterial._pad = 0.0f;
+    
+    std::string line;
+    while (std::getline(file, line))
+    {
+        // Skip empty lines and comments
+        if (line.empty() || line[0] == '#')
+            continue;
+        
+        std::stringstream ss(line);
+        std::string type;
+        ss >> type;
+        
+        if (type == "newmtl")
+        {
+            // Save previous material if exists
+            if (hasCurrentMaterial)
+            {
+                materials.push_back(currentMaterial);
+            }
+            
+            // Start new material with defaults
+            currentMaterial = shader_types::MaterialData{};
+            currentMaterial.diffuseColor = {0.8f, 0.8f, 0.8f};
+            currentMaterial.specularColor = {0.0f, 0.0f, 0.0f};
+            currentMaterial.emissiveColor = {0.0f, 0.0f, 0.0f};
+            currentMaterial.shininess = 0.0f;
+            currentMaterial.reflectivity = 0.0f;
+            currentMaterial._pad = 0.0f;
+            hasCurrentMaterial = true;
+        }
+        else if (type == "Kd") // Diffuse color
+        {
+            float r, g, b;
+            if (ss >> r >> g >> b)
+            {
+                currentMaterial.diffuseColor = {r, g, b};
+                hasCurrentMaterial = true;
+            }
+        }
+        else if (type == "Ks") // Specular color
+        {
+            float r, g, b;
+            if (ss >> r >> g >> b)
+            {
+                currentMaterial.specularColor = {r, g, b};
+                hasCurrentMaterial = true;
+            }
+        }
+        else if (type == "Ke") // Emissive color
+        {
+            float r, g, b;
+            if (ss >> r >> g >> b)
+            {
+                currentMaterial.emissiveColor = {r, g, b};
+                hasCurrentMaterial = true;
+            }
+        }
+        else if (type == "Ns") // Shininess (specular exponent)
+        {
+            float ns;
+            if (ss >> ns)
+            {
+                // MTL files often use very high values (0-1000), but we want reasonable shininess
+                // Clamp to a reasonable range and scale if needed
+                currentMaterial.shininess = ns > 1000.0f ? 128.0f : (ns < 0.0f ? 0.0f : ns);
+                hasCurrentMaterial = true;
+            }
+        }
+        else if (type == "d" || type == "Tr") // Dissolve (transparency) - use as reflectivity hint
+        {
+            float d;
+            if (ss >> d)
+            {
+                // Convert dissolve to a reflectivity hint (inverse of transparency)
+                // d=1.0 (opaque) -> reflectivity=0, d=0.0 (transparent) -> reflectivity=0.5
+                // This is just a hint since reflectivity isn't really the same as transparency
+                currentMaterial.reflectivity = (1.0f - d) * 0.5f;
+                hasCurrentMaterial = true;
+            }
+        }
+        // Note: Ka (ambient) is typically ignored in modern lighting models
+        // We can add it to diffuse if needed, but for now we'll skip it
+    }
+    
+    // Don't forget to add the last material
+    if (hasCurrentMaterial)
+    {
+        materials.push_back(currentMaterial);
+    }
+    
+    return materials;
+}
+
+// Helper function to get MTL file path from OBJ file path
+static std::string getMaterialFilePath(const std::string& objPath)
+{
+    std::string mtlPath = objPath;
+    
+    // Find the last occurrence of '.obj' and replace with '.mtl'
+    size_t pos = mtlPath.rfind(".obj");
+    if (pos != std::string::npos)
+    {
+        mtlPath.replace(pos, 4, ".mtl");
+    }
+    else
+    {
+        // If no .obj extension, just append .mtl
+        mtlPath += ".mtl";
+    }
+    
+    return mtlPath;
+}
+
+// Get default preset materials
+static std::vector<shader_types::MaterialData> getDefaultMaterials()
+{
+    std::vector<shader_types::MaterialData> materials(3);
+    
+    // 0: shiny plastic
+    materials[0].diffuseColor   = { 0.6f, 0.05f, 0.05f };
+    materials[0].specularColor  = { 1.0f, 0.9f, 0.9f };
+    materials[0].shininess      = 16.0f;
+    materials[0].emissiveColor  = { 0.02f, 0.01f, 0.01f };
+    materials[0].reflectivity   = 0.2f;
+    
+    // 1: dull rubber
+    materials[1].diffuseColor   = { 0.15f, 0.7f, 0.15f };
+    materials[1].specularColor  = { 0.03f, 0.03f, 0.03f };
+    materials[1].shininess      = 2.0f;
+    materials[1].emissiveColor  = { 0.0f, 0.0f, 0.0f };
+    materials[1].reflectivity   = 0.0f;
+    
+    // 2: gold-like (metallic - low diffuse, high specular)
+    materials[2].diffuseColor = {0.1f, 0.08f, 0.04f};
+    materials[2].specularColor = {1.0f, 0.9f, 0.8f};
+    materials[2].shininess     = 32.0f;
+    materials[2].emissiveColor  = { 0.05f, 0.04f, 0.02f };
+    materials[2].reflectivity   = 0.7f;
+    
+    return materials;
+}
+
 #pragma mark - Renderer
 #pragma region Renderer {
 
@@ -823,6 +990,7 @@ Renderer::Renderer( MTL::Device* pDevice )
 , _pLightBuffer(nullptr)
 , _angle(0.f)
 , _frame(0)
+, _materialCount(0)
 {
     for (int i = 0; i < kMaxFramesInFlight; ++i)
     {
@@ -1054,10 +1222,11 @@ void Renderer::buildBuffers()
     
     SceneBuilder builder;
     bool meshLoaded = false;
+    std::string objFilePath = "./objects/Breaking.obj";
     
     try
     {
-        SceneBuilder::Mesh loadedMesh = builder.importObjectFile("./objects/Breaking.obj");
+        SceneBuilder::Mesh loadedMesh = builder.importObjectFile(objFilePath);
         if (!loadedMesh.vertices.empty() && !loadedMesh.indices.empty())
         {
             builder.setMesh(loadedMesh);
@@ -1078,6 +1247,7 @@ void Renderer::buildBuffers()
     if (!meshLoaded)
     {
         builder.loadPreset();
+        objFilePath = ""; // Clear path since we're using preset
     }
 
     const SceneBuilder::Mesh& mesh = builder.getMesh();
@@ -1120,33 +1290,45 @@ void Renderer::buildBuffers()
             _pDevice->newBuffer(cameraDataSize, MTL::ResourceStorageModeManaged);
     }
     
-    shader_types::MaterialData materials[3];
+    // Load materials: try MTL file first, fall back to defaults
+    std::vector<shader_types::MaterialData> materials;
+    
+    if (!objFilePath.empty())
+    {
+        std::string mtlPath = getMaterialFilePath(objFilePath);
+        materials = parseMaterialFile(mtlPath);
+        
+        if (!materials.empty())
+        {
+            __builtin_printf("Successfully loaded %zu material(s) from MTL file: %s\n", 
+                           materials.size(), mtlPath.c_str());
+        }
+        else
+        {
+            __builtin_printf("MTL file not found or empty (%s), using default materials\n", 
+                           mtlPath.c_str());
+            materials = getDefaultMaterials();
+        }
+    }
+    else
+    {
+        // Using preset mesh, use default materials
+        materials = getDefaultMaterials();
+        __builtin_printf("Using default preset materials\n");
+    }
+    
+    // Ensure we have at least one material
+    if (materials.empty())
+    {
+        materials = getDefaultMaterials();
+        __builtin_printf("Warning: No materials available, using defaults\n");
+    }
 
-        // 0: shiny plastic
-        materials[0].diffuseColor   = { 0.6f, 0.05f, 0.05f };
-        materials[0].specularColor  = { 1.0f, 0.9f, 0.9f };
-        materials[0].shininess      = 16.0f;
-        materials[0].emissiveColor  = { 0.02f, 0.01f, 0.01f };
-        materials[0].reflectivity   = 0.2f; //unused right now
-
-        // 1: dull rubber
-        materials[1].diffuseColor   = { 0.15f, 0.7f, 0.15f };
-        materials[1].specularColor  = { 0.03f, 0.03f, 0.03f };
-        materials[1].shininess      = 2.0f;
-        materials[1].emissiveColor  = { 0.0f, 0.0f, 0.0f };
-        materials[1].reflectivity   = 0.0f; //unused right now
-
-        // 2: gold-like (metallic - low diffuse, high specular)
-        materials[2].diffuseColor = {0.1f, 0.08f, 0.04f};  // Slightly brighter for visibility
-        materials[2].specularColor = {1.0f, 0.9f, 0.8f};
-        materials[2].shininess     = 32.0f;  // Lower shininess for more visible highlights
-        materials[2].emissiveColor  = { 0.05f, 0.04f, 0.02f };
-        materials[2].reflectivity   = 0.7f; //unused right now
-
-        _pMaterialBuffer =
-            _pDevice->newBuffer(sizeof(materials), MTL::ResourceStorageModeManaged);
-        memcpy(_pMaterialBuffer->contents(), materials, sizeof(materials));
-        _pMaterialBuffer->didModifyRange(NS::Range::Make(0, _pMaterialBuffer->length()));
+    _materialCount = materials.size();
+    const size_t materialDataSize = materials.size() * sizeof(shader_types::MaterialData);
+    _pMaterialBuffer = _pDevice->newBuffer(materialDataSize, MTL::ResourceStorageModeManaged);
+    memcpy(_pMaterialBuffer->contents(), materials.data(), materialDataSize);
+    _pMaterialBuffer->didModifyRange(NS::Range::Make(0, _pMaterialBuffer->length()));
     
     // Light buffer - will be updated each frame in draw()
     shader_types::LightData light;
@@ -1221,7 +1403,8 @@ void Renderer::buildBuffers()
             float g = 1.0f - r;
             float b = sinf( M_PI * 2.0f * iDivNumInstances );
             pInstanceData[ i ].instanceColor = (float4){ r, g, b, 1.0f };
-            pInstanceData[i].materialIndex = static_cast<uint32_t>(iy % 3);
+            // Cycle through available materials, ensuring we don't exceed material count
+            pInstanceData[i].materialIndex = static_cast<uint32_t>(_materialCount > 0 ? (iy % _materialCount) : 0);
 
             ix += 1;
         }

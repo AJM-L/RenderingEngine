@@ -1,8 +1,8 @@
 # Metal Render Pipeline
 AJ Matheson-Lieber
 
-![Final Render](./Documentation/render-pipeline.png)
-
+![Final Render](./Documentation/custom-model.png)
+Figure shows a screenshot of a figure I sculpted in blender and imported to my renderer as an object file.
 
 ## Dependencies
 
@@ -23,14 +23,15 @@ By default, the Makefile compiles the source with the `-O2` optimization level. 
 
 ## Overview
 
-This project implements a simple real-time rendering pipeline in **Metal** using **C++**. After spending much of the semester working in BabylonJS, I wanted to explore a lower-level graphics API and revisit C++ development. Starting from a minimal template that initialized a window and provided basic geometry rendering, I extended the system significantly.
+This project implements a real-time rendering pipeline in **Metal** using **C++**. I was motivated to create this project after taking a class on 3d computer graphics. This project is an exploratory implementation of a lower-level graphics API using C++ and Metal.
 
 The final pipeline includes:
 
 - **Point-based Blinn–Phong lighting**
 - **Procedural sphere generation**
-- **Simple FPS-style camera movement**
-- **Three custom material presets** (matte, plastic, metallic)
+- **Three custom material presets**
+- **Object and Material file loading**
+
 
 This project provided hands-on experience with GPU programming, shader development, and the structure of a graphics pipeline outside of a high-level engine.
 
@@ -56,46 +57,25 @@ The template only supported directional diffuse lighting. Implementing point-bas
 - Rewriting the fragment shader  
 - Debugging issues related to coordinate spaces and normal correctness  
 
-### Geometry Generation
+### Object File Loading
 
-Metal does not provide built-in primitive shapes. Procedurally generating spheres required:
+I added a custom Object (.obj) and Material (.mtl) file parser based on the Wavefront Object file format. The system supports specular color, diffuse color, emmissive color, and shininess based on the lighting implementation I currently have (so no reflection or textures yet). File parsing requires:
+
+- Text based file parsing
+- Input validation and security
+- Memory allocation and management
+
+### Geometry Generation Fallback
+
+Metal does not provide built-in primitive shapes, so I decided to implement procedural sphere generation as a fallback. Procedurally generating spheres required:
 
 - Computing latitude/longitude vertices  
 - Generating smooth normals  
 - Building indexed triangle lists  
 - Testing lighting across material presets to confirm correctness  
 
-### Unresolved or Partially Completed Challenges
 
-Some features did not make it into the final version due to time constraints:
 
-- **Skybox or textured background:** Implementing this required additional shader work and texture resources, so the pipeline uses a simple clear color.
-- **Physically Based Rendering (PBR):** Full PBR requires environment maps and additional material parameters. I compromised with three Blinn–Phong–based presets.
-- **Engine-level abstractions:** A more modular engine architecture (meshes, materials, scene graph) would improve extensibility, but was out of scope.
-- **Polished camera controls:** The camera works but lacks smoothing, mouse locking, or more expressive input handling.
-
-These compromises allowed me to focus on delivering stable, core rendering features within the project timeline.
-
----
-
-## Discussion
-
-Overall, this project gave me a much deeper understanding of how a rendering pipeline operates beneath the abstractions of a high-level engine. By implementing point lighting, procedural geometry, custom materials, and a manual camera system, I built a small but complete real-time rendering environment where I controlled everything from CPU-side data structures to GPU-side shading calculations.
-
-With more time, I would have pursued improvements in two main areas:
-
-### 1. Visual Fidelity
-- Skybox and image-based reflections  
-- More advanced material models  
-- Higher-quality shading and post-processing  
-
-### 2. Architectural Structure
-- Modular engine-like components (mesh loader, material system, renderer interface)  
-- Additional geometry generators  
-- UI-based material switching  
-- Improved camera and input system  
-
-Despite some features not making it into the final build, the project succeeded in teaching me how low-level rendering works in practice and highlighted clear pathways for turning this prototype into a more polished mini-engine.
 
 ---
 

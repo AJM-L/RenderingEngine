@@ -1,8 +1,7 @@
 # Metal Render Pipeline
 AJ Matheson-Lieber
 
-![Final Render](./Documentation/custom-model.png)
-Figure shows a screenshot of a figure I sculpted in blender and imported to my renderer as an object file.
+[![Final Render](Documentation/custom-model.png)](https://youtu.be/RUhq3tnou9s)
 
 ## Dependencies
 

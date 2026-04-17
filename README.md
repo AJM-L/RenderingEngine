@@ -36,17 +36,6 @@ This project provided hands-on experience with GPU programming, shader developme
 
 ---
 
-## Challenges
-
-Transitioning from BabylonJS to Metal was the most substantial obstacle. BabylonJS abstracts nearly all rendering details—geometry buffers, camera management, light calculations—while Metal requires manual control over:
-
-- Buffer creation and memory layout  
-- Uniform and argument encoding  
-- Shader program structure  
-- Render pipeline configuration  
-
-To navigate this, I broke the pipeline into explicit stages and mapped familiar concepts (meshes, materials, transforms) onto Metal’s API. This required deepening my understanding of Metal’s buffer model and shader system.
-
 ### Lighting Implementation
 
 The template only supported directional diffuse lighting. Implementing point-based Blinn–Phong lighting involved:

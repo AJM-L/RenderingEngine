@@ -403,10 +403,7 @@ namespace math
         // Extract upper-left 3x3
         simd::float3x3 upper3x3 = discardTranslation(m);
         
-        // Calculate inverse transpose for proper normal transformation
-        // For a 3x3 matrix: inverse_transpose = transpose(inverse(matrix))
-        // Using simd's built-in functions
-        simd::float3x3 transposed = simd_transpose(upper3x3);
+        // Calculate inverse transpose for proper normal transformation.
         simd::float3x3 inverse = simd_inverse(upper3x3);
         return simd_transpose(inverse);
     }
@@ -691,13 +688,13 @@ static void createSphereMesh(const float radius,
         float v = stack / float(stacks);        // v: 0 to 1
         float theta = v * M_PI;                 // theta: 0 to pi
 
-        // find place on cirlce
+        // find place on circle
         float sinTheta = sinf(theta);
         float cosTheta = cosf(theta);
 
         for (uint32_t slice = 0; slice <= slices; ++slice)
         {
-            // caluculate phi
+            // calculate phi
             float u = slice / float(slices);    // u: 0 to 1
             float phi = u * 2.0f * M_PI;        // phi: 0 to 2*pi
 
@@ -1222,7 +1219,7 @@ void Renderer::buildBuffers()
     
     SceneBuilder builder;
     bool meshLoaded = false;
-    std::string objFilePath = "./objects/Breaking.obj";
+    std::string objFilePath = "./build/objects/Monkey.obj";
     
     try
     {

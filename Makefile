@@ -38,10 +38,13 @@ VPATH=./metal-cpp
 
 all: build/render-pipeline
 
-.PHONY: all
+.PHONY: all clean run
 
 build/render-pipeline: $(APP_RENDER_PIPELINE_OBJECTS) Makefile
 	$(CC) $(CFLAGS) $(LDFLAGS) $(APP_RENDER_PIPELINE_OBJECTS) -o $@
+
+run: build/render-pipeline
+	./build/render-pipeline
 
 clean:
 	rm -f $(APP_RENDER_PIPELINE_OBJECTS) \

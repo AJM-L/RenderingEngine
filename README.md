@@ -1,73 +1,106 @@
-# Metal Render Pipeline
+# Metal C++ Rendering Engine
+
 AJ Matheson-Lieber
 
-[![Final Render](Documentation/custom-model.png)](https://youtu.be/RUhq3tnou9s)
+[![Final render](Documentation/custom-model.png)](https://youtu.be/RUhq3tnou9s)
 
-## Dependencies
+A real-time 3D renderer built directly on Apple's Metal API from C++17. This project started from Apple's `metal-cpp` sample scaffolding and extends it into a custom rendering pipeline with model loading, material parsing, procedural geometry fallback, per-frame GPU resource management, and dynamic Blinn-Phong lighting.
 
-These samples include the **metal-cpp** and **metal-cpp-extensions** libraries.
+The goal of this repository is to demonstrate systems-level software engineering in a graphics context: explicit memory ownership, GPU/CPU synchronization, file-format parsing, shader development, and debugging across coordinate spaces without relying on a game engine.
 
-Use either the included Xcode project or the UNIX make utility to build the project.
+## Technical Highlights
 
-This project requires C++17 support (available since Xcode 9.3).
+- **Direct Metal API usage from C++:** Creates the AppKit window, `MTK::View`, Metal device, command queue, render pipeline state, depth-stencil state, buffers, and draw calls manually through `metal-cpp`.
+- **Triple-buffered frame resources:** Maintains per-frame instance and camera buffers behind a dispatch semaphore to avoid CPU/GPU write hazards while keeping frames in flight.
+- **Custom OBJ importer:** Parses Wavefront `.obj` vertex positions, normals, UVs, positive and negative indices, triangles, quads, and n-gons. Faces are triangulated with a fan strategy and vertices are deduplicated by `(position, texcoord, normal)` tuples before upload.
+- **MTL material parser:** Reads diffuse, specular, emissive, shininess, and transparency-derived reflectivity data from `.mtl` files, with robust defaults when material data is absent.
+- **Runtime Metal shader compilation:** Embeds Metal Shading Language source, compiles vertex/fragment functions at startup, and binds shared C++/shader layout structs for vertex, instance, camera, material, and light data.
+- **Point-light Blinn-Phong shading:** Computes world-space normals, view vectors, point-light vectors, diffuse response, Blinn-Phong specular highlights, ambient contribution, and emissive material output in the fragment shader.
+- **Procedural geometry fallback:** Generates a UV sphere with indexed triangles, smooth normals, and UV coordinates when model loading fails, keeping the renderer demonstrable without external assets.
+- **Camera and light animation:** Uses custom matrix math for perspective, look-at, scale, translation, rotations, and inverse-transpose normal transforms.
 
-## Building with Make
+## Demo
 
-To build the samples using a Makefile, open the terminal and run the `make` command. The build process will put the executables into the `build/` folder.
+The project includes screenshots under `Documentation/` and a short render capture linked from the image above.
 
-By default, the Makefile compiles the source with the `-O2` optimization level. Pass the following options to make change the build configuration:
+![Render pipeline diagram](Documentation/render-pipeline.png)
 
-* `DEBUG=1` : disable optimizations and include symbols (`-g`).
-* `ASAN=1` : build with address sanitizer support (`-fsanitize=address`).
+By default, the renderer attempts to load the bundled sample model at `build/objects/Monkey.obj`. If that load fails or the mesh is empty, it falls back to a generated sphere.
 
-## Overview
+## Build And Run
 
-This project implements a real-time rendering pipeline in **Metal** using **C++**. I was motivated to create this project after taking a class on 3d computer graphics. This project is an exploratory implementation of a lower-level graphics API using C++ and Metal.
+Requirements:
 
-The final pipeline includes:
+- macOS with Metal support
+- Xcode command line tools
+- Clang with C++17 support
 
-- **Point-based Blinn–Phong lighting**
-- **Procedural sphere generation**
-- **Three custom material presets**
-- **Object and Material file loading**
+Build:
 
+```sh
+make
+```
 
-This project provided hands-on experience with GPU programming, shader development, and the structure of a graphics pipeline outside of a high-level engine.
+Run from the repository root so relative asset paths resolve correctly:
 
----
+```sh
+make run
+```
 
-### Lighting Implementation
+Optional build modes:
 
-The template only supported directional diffuse lighting. Implementing point-based Blinn–Phong lighting involved:
+```sh
+make DEBUG=1
+make ASAN=1
+```
 
-- Restructuring uniform buffers  
-- Adding a light position and intensity  
-- Rewriting the fragment shader  
-- Debugging issues related to coordinate spaces and normal correctness  
+Clean generated objects and executable:
 
-### Object File Loading
+```sh
+make clean
+```
 
-I added a custom Object (.obj) and Material (.mtl) file parser based on the Wavefront Object file format. The system supports specular color, diffuse color, emmissive color, and shininess based on the lighting implementation I currently have (so no reflection or textures yet). File parsing requires:
+## Architecture
 
-- Text based file parsing
-- Input validation and security
-- Memory allocation and management
+```text
+AppKit application
+  -> MTK::View draw loop
+     -> Renderer
+        -> runtime shader compilation
+        -> depth/pipeline state creation
+        -> mesh/material/light/camera buffer upload
+        -> per-frame animation and drawIndexedPrimitives
 
-### Geometry Generation Fallback
+SceneBuilder
+  -> OBJ parsing and vertex deduplication
+  -> procedural sphere fallback
 
-Metal does not provide built-in primitive shapes, so I decided to implement procedural sphere generation as a fallback. Procedurally generating spheres required:
+Shader pipeline
+  -> vertex shader: object -> world -> view -> clip transforms
+  -> fragment shader: material lookup + point-light Blinn-Phong lighting
+```
 
-- Computing latitude/longitude vertices  
-- Generating smooth normals  
-- Building indexed triangle lists  
-- Testing lighting across material presets to confirm correctness  
+More implementation detail is available in [Documentation/TECHNICAL_NOTES.md](Documentation/TECHNICAL_NOTES.md).
 
+## What This Shows
 
+This repository is intentionally low-level. Instead of calling into a rendering engine, it implements the pieces that engines usually hide:
 
+- translating file-format data into GPU-ready vertex/index buffers
+- managing object lifetimes across C++ wrappers for Objective-C Metal objects
+- synchronizing CPU writes with in-flight GPU command buffers
+- keeping transform math consistent between CPU code and shader code
+- debugging visual output caused by normals, winding, coordinate spaces, and material parameters
 
----
+## Current Limitations
 
-## Sources
+- Texture maps are parsed as UV coordinates but not sampled in the shader yet.
+- The material system is Blinn-Phong rather than physically based rendering.
+- The renderer currently displays one loaded mesh instance rather than a full scene graph.
+- OBJ loading is synchronous at startup and intended for small showcase assets.
 
-- https://developer.apple.com/metal/sample-code/  
-- https://developer.apple.com/documentation/Metal/
+## Credits
+
+- Apple `metal-cpp` headers and sample scaffolding: https://developer.apple.com/metal/cpp/
+- Metal documentation and sample code: https://developer.apple.com/metal/
+
